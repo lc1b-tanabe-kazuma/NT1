@@ -1,18 +1,47 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Novice.h>
+#include <cstdint>
 #include <cstring>
 #include <imgui.h>
+#include <random>
+#include <string>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
 #pragma comment(lib, "Ws2_32.lib")
 
+// 送受信するメッセージの種類
+enum class MassageType : uint16_t { Text = 1 };
+
+// 受信した文字列の末尾にランダムな英数字を追加する
+std::string AddRandomString(const std::string& text) {
+	static const char chars[] = "0123456789"
+	                            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	                            "abcdefghijklmnopqrstuvwxyz";
+
+	static std::random_device rd;
+	static std::mt19937 engine(rd());
+
+	std::uniform_int_distribution<int> lengthDist(5, 10);
+	std::uniform_int_distribution<int> charDist(0, static_cast<int>(sizeof(chars) - 2));
+
+	int length = lengthDist(engine);
+
+	std::string result = text;
+
+	for (int i = 0; i < length; ++i) {
+		result += chars[charDist(engine)];
+	}
+
+	return result;
+}
+
 // Windowsアプリのmain関数。ImGuiを使うため、Debugで実行する。
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-	Novice::Initialize("NT1_01_00", 1280, 740);
+	Novice::Initialize("NT1_01_02", 1280, 740);
 	char host[64] = "34.104.202.113";
-	char port[8] = "8001"; // 01_00・01_01のEcho用ポート
+	char port[8] = "8000";
 	bool connected = false;
 
 	// 通信用の変数を用意し、Winsockを初期化する。
@@ -122,8 +151,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 						// 受信した文字列の末尾に終端文字を追加
 						buffer[received] = '\0';
 
-						// 受信内容を画面表示用の変数に保存
-						strcpy_s(receivedText, sizeof(receivedText), buffer);
+						// 受信した文字列の末尾にランダムな英数字を追加する
+						std::string reply = AddRandomString(buffer);
+
+						// ランダム文字列を追加した内容を保存する
+						strcpy_s(receivedText, sizeof(receivedText), reply.c_str());
 
 						// 受信したバイト数を加算する
 						totalBytesReceived += received;
