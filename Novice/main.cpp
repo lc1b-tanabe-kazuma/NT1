@@ -1,6 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Novice.h>
+#include <cstring>
 #include <imgui.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -18,6 +19,16 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	WSADATA wsaData;
 	SOCKET sock = INVALID_SOCKET;
 
+	// 送信する文字列
+	char text[256] = "";
+
+	// サーバーから受信した文字列
+	char receivedText[256] = "";
+
+	// 送信・受信したバイト数
+	int totalBytesSent = 0;
+	int totalBytesReceived = 0;
+
 	// Winsockを初期化する
 	WSAStartup(MAKEWORD(2, 2), &wsaData); // windowsの通信機能を準備する
 
@@ -31,7 +42,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		ImGui::InputText("Host", host, sizeof(host));
 		ImGui::InputText("Port", port, sizeof(port));
 		if (ImGui::Button("Connect")) {
-			
+
 			// 接続先を取得し、ソケットを作って接続する。
 			addrinfo hints{};
 			addrinfo* result = nullptr;
@@ -84,6 +95,51 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		}
 		ImGui::EndDisabled();
 		ImGui::Text("Status: %s", connected ? "Connected" : "Not connected");
+
+		// 送信する文字列を入力
+		ImGui::InputText("Text", text, sizeof(text));
+
+		// 接続中だけSendボタンを有効にする
+		ImGui::BeginDisabled(!connected);
+
+		if (ImGui::Button("Send")) {
+			// 送信する文字列のバイト数を取得する
+			int sendSize = static_cast<int>(strlen(text));
+
+			// 空文字列でなければ送信する
+			if (sendSize > 0) {
+				int sent = send(sock, text, sendSize, 0);
+
+				if (sent != SOCKET_ERROR && sent > 0) {
+					// 実際に送信できたバイト数を加算する
+					totalBytesSent += sent;
+
+					// サーバーからの返信を受信する
+					char buffer[256]{};
+					int received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+
+					if (received > 0) {
+						// 受信した文字列の末尾に終端文字を追加
+						buffer[received] = '\0';
+
+						// 受信内容を画面表示用の変数に保存
+						strcpy_s(receivedText, sizeof(receivedText), buffer);
+
+						// 受信したバイト数を加算する
+						totalBytesReceived += received;
+					}
+				}
+			}
+		}
+		ImGui::EndDisabled();
+
+		// 受信した文字列を表示
+		ImGui::Text("Received: %s", receivedText);
+
+		// 送受信したバイト数を表示
+		ImGui::Text("Sent: %d bytes", totalBytesSent);
+		ImGui::Text("Received: %d bytes", totalBytesReceived);
+		ImGui::Text("Total: %d bytes", totalBytesSent + totalBytesReceived);
 		ImGui::End();
 #endif
 		Novice::EndFrame();
