@@ -1,52 +1,105 @@
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <Novice.h>
+#include <imgui.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
-const char kWindowTitle[] = "学籍番号";
+#pragma comment(lib, "Ws2_32.lib")
 
-// Windowsアプリでのエントリーポイント(main関数)
-int WINAPI WinMain(_In_ HINSTANCE, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
+// Windowsアプリのmain関数。ImGuiを使うため、Debugで実行する。
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+	Novice::Initialize("NT1_01_00", 1280, 740);
+	char host[64] = "34.104.202.113";
+	char port[8] = "8001"; // 01_00・01_01のEcho用ポート
+	bool connected = false;
 
-	// ライブラリの初期化
-	Novice::Initialize(kWindowTitle, 1280, 720);
+	// TODO 1: 通信用の変数を用意し、Winsockを初期化する。
+	WSADATA wsaData;
+	SOCKET sock = INVALID_SOCKET;
 
-	// キー入力結果を受け取る箱
-	char keys[256] = {0};
-	char preKeys[256] = {0};
+	// Winsockを初期化する
+	WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-	// ウィンドウの×ボタンが押されるまでループ
 	while (Novice::ProcessMessage() == 0) {
-		// フレームの開始
 		Novice::BeginFrame();
+#ifdef USE_IMGUI
+		ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Once);
+		ImGui::SetNextWindowSize(ImVec2(600, 200), ImGuiCond_Once);
+		ImGui::Begin("TCP Connection");
+		ImGui::BeginDisabled(connected);
+		ImGui::InputText("Host", host, sizeof(host));
+		ImGui::InputText("Port", port, sizeof(port));
+		if (ImGui::Button("Connect")) {
+			// TODO 2: 接続先を取得し、ソケットを作って接続する。
+			addrinfo hints{};
+			addrinfo* result = nullptr;
 
-		// キー入力を受け取る
-		memcpy(preKeys, keys, 256);
-		Novice::GetHitKeyStateAll(keys);
+			// TCP通信の設定
+			hints.ai_family = AF_INET;
+			hints.ai_socktype = SOCK_STREAM;
+			hints.ai_protocol = IPPROTO_TCP;
 
-		///
-		/// ↓更新処理ここから
-		///
+			// 接続先の情報を取得する
+			if (getaddrinfo(host, port, &hints, &result) == 0) {
 
-		///
-		/// ↑更新処理ここまで
-		///
+				// ソケットを作成する
+				sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
 
-		///
-		/// ↓描画処理ここから
-		///
+				// ソケットの作成に成功した場合
+				if (sock != INVALID_SOCKET) {
 
-		///
-		/// ↑描画処理ここまで
-		///
+					// サーバーに接続する
+					if (connect(sock, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0) {
+						connected = true;
+					} else {
+						// 接続に失敗した場合はソケットを閉じる
+						closesocket(sock);
+						sock = INVALID_SOCKET;
+					}
+				}
 
-		// フレームの終了
-		Novice::EndFrame();
-
-		// ESCキーが押されたらループを抜ける
-		if (preKeys[DIK_ESCAPE] == 0 && keys[DIK_ESCAPE] != 0) {
-			break;
+				// 接続先の情報を解放する
+				freeaddrinfo(result);
+			}
 		}
+		ImGui::EndDisabled();
+		ImGui::SameLine();
+		ImGui::BeginDisabled(!connected);
+		if (ImGui::Button("Disconnect")) {
+			// TODO 3: ソケットを閉じ、未接続の状態へ戻す。
+			// 通信を終了する
+			shutdown(sock, SD_BOTH);
+
+			// ソケットを閉じる
+			closesocket(sock);
+
+			// 無効なソケットに戻す
+			sock = INVALID_SOCKET;
+
+			// 未接続状態にする
+			connected = false;
+		}
+		ImGui::EndDisabled();
+		ImGui::Text("Status: %s", connected ? "Connected" : "Not connected");
+		ImGui::End();
+#endif
+		Novice::EndFrame();
 	}
 
-	// ライブラリの終了
+	// TODO 4: 接続が残っていれば閉じ、Winsockを終了する。
+	// 接続が残っている場合
+	if (sock != INVALID_SOCKET) {
+		// 通信を終了する
+		shutdown(sock, SD_BOTH);
+
+		// ソケットを閉じる
+		closesocket(sock);
+	}
+
+	// Winsockを終了する
+	WSACleanup();
+
 	Novice::Finalize();
 	return 0;
 }
