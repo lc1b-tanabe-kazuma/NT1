@@ -103,31 +103,82 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		ImGui::BeginDisabled(!connected);
 
 		if (ImGui::Button("Send")) {
-			// 送信する文字列のバイト数を取得する
+
+			// 今回の送受信カウンタをリセット
+			totalBytesSent = 0;
+			totalBytesReceived = 0;
+
+			// 送信する文字列のバイト数
 			int sendSize = static_cast<int>(strlen(text));
 
-			// 空文字列でなければ送信する
 			if (sendSize > 0) {
-				int sent = send(sock, text, sendSize, 0);
 
-				if (sent != SOCKET_ERROR && sent > 0) {
-					// 実際に送信できたバイト数を加算する
+				// -------------------------
+				// 送信処理
+				// -------------------------
+				int totalSent = 0;
+				bool communicationOK = true;
+
+				// 全バイトを送信するまで繰り返す
+				while (totalSent < sendSize) {
+
+					int sent = send(sock, text + totalSent, sendSize - totalSent, 0);
+
+					// エラーまたは送信できない状態
+					if (sent == SOCKET_ERROR || sent == 0) {
+						communicationOK = false;
+						break;
+					}
+
+					// 実際に送信できたバイト数を加算
+					totalSent += sent;
 					totalBytesSent += sent;
+				}
 
-					// サーバーからの返信を受信する
+				// -------------------------
+				// 受信処理
+				// -------------------------
+				if (communicationOK) {
+
 					char buffer[256]{};
-					int received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+					int totalReceived = 0;
 
-					if (received > 0) {
-						// 受信した文字列の末尾に終端文字を追加
-						buffer[received] = '\0';
+					// 送信したサイズ分を受信するまで繰り返す
+					while (totalReceived < sendSize) {
 
-						// 受信内容を画面表示用の変数に保存
-						strcpy_s(receivedText, sizeof(receivedText), buffer);
+						int received = recv(sock, buffer + totalReceived, sendSize - totalReceived, 0);
 
-						// 受信したバイト数を加算する
+						// 0は相手からの切断
+						// SOCKET_ERRORは受信エラー
+						if (received == 0 || received == SOCKET_ERROR) {
+							communicationOK = false;
+							break;
+						}
+
+						// 実際に受信したバイト数を加算
+						totalReceived += received;
 						totalBytesReceived += received;
 					}
+
+					// 全データを受信できた場合だけ文字列にする
+					if (communicationOK) {
+						buffer[totalReceived] = '\0';
+
+						strcpy_s(receivedText, sizeof(receivedText), buffer);
+					}
+				}
+
+				// -------------------------
+				// 通信エラー・切断への対応
+				// -------------------------
+				if (!communicationOK) {
+
+					shutdown(sock, SD_BOTH);
+					closesocket(sock);
+					sock = INVALID_SOCKET;
+					connected = false;
+
+					strcpy_s(receivedText, sizeof(receivedText), "Connection closed or communication error");
 				}
 			}
 		}
