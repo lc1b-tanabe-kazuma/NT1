@@ -14,12 +14,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	char port[8] = "8001"; // 01_00・01_01のEcho用ポート
 	bool connected = false;
 
-	// TODO 1: 通信用の変数を用意し、Winsockを初期化する。
+	// 通信用の変数を用意し、Winsockを初期化する。
 	WSADATA wsaData;
 	SOCKET sock = INVALID_SOCKET;
 
 	// Winsockを初期化する
-	WSAStartup(MAKEWORD(2, 2), &wsaData);
+	WSAStartup(MAKEWORD(2, 2), &wsaData); // windowsの通信機能を準備する
 
 	while (Novice::ProcessMessage() == 0) {
 		Novice::BeginFrame();
@@ -31,7 +31,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		ImGui::InputText("Host", host, sizeof(host));
 		ImGui::InputText("Port", port, sizeof(port));
 		if (ImGui::Button("Connect")) {
-			// TODO 2: 接続先を取得し、ソケットを作って接続する。
+			
+			// 接続先を取得し、ソケットを作って接続する。
 			addrinfo hints{};
 			addrinfo* result = nullptr;
 
@@ -66,8 +67,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		ImGui::EndDisabled();
 		ImGui::SameLine();
 		ImGui::BeginDisabled(!connected);
+
+		// 接続中の場合は切断ボタンを有効にする
 		if (ImGui::Button("Disconnect")) {
-			// TODO 3: ソケットを閉じ、未接続の状態へ戻す。
 			// 通信を終了する
 			shutdown(sock, SD_BOTH);
 
@@ -87,8 +89,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		Novice::EndFrame();
 	}
 
-	// TODO 4: 接続が残っていれば閉じ、Winsockを終了する。
-	// 接続が残っている場合
+	// 接続が残っていれば閉じ、Winsockを終了する。
 	if (sock != INVALID_SOCKET) {
 		// 通信を終了する
 		shutdown(sock, SD_BOTH);
