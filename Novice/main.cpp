@@ -4,42 +4,16 @@
 #include <cstdint>
 #include <cstring>
 #include <imgui.h>
-#include <random>
-#include <string>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-
 #pragma comment(lib, "Ws2_32.lib")
 
-// 送受信するメッセージの種類
-enum class MassageType : uint16_t { Text = 1 };
-
-// 受信した文字列の末尾にランダムな英数字を追加する
-std::string AddRandomString(const std::string& text) {
-	static const char chars[] = "0123456789"
-	                            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	                            "abcdefghijklmnopqrstuvwxyz";
-
-	static std::random_device rd;
-	static std::mt19937 engine(rd());
-
-	std::uniform_int_distribution<int> lengthDist(5, 10);
-	std::uniform_int_distribution<int> charDist(0, static_cast<int>(sizeof(chars) - 2));
-
-	int length = lengthDist(engine);
-
-	std::string result = text;
-
-	for (int i = 0; i < length; ++i) {
-		result += chars[charDist(engine)];
-	}
-
-	return result;
-}
+//
+enum class MessageType : uint16_t { Text = 1 };
 
 // Windowsアプリのmain関数。ImGuiを使うため、Debugで実行する。
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-	Novice::Initialize("NT1_01_02", 1280, 740);
+	Novice::Initialize("NT1_01_00", 1280, 740);
 	char host[64] = "34.104.202.113";
 	char port[8] = "8000";
 	bool connected = false;
@@ -132,34 +106,114 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		ImGui::BeginDisabled(!connected);
 
 		if (ImGui::Button("Send")) {
-			// 送信する文字列のバイト数を取得する
-			int sendSize = static_cast<int>(strlen(text));
 
-			// 空文字列でなければ送信する
-			if (sendSize > 0) {
-				int sent = send(sock, text, sendSize, 0);
+			// 今回の送受信カウンタをリセット
+			totalBytesSent = 0;
+			totalBytesReceived = 0;
 
-				if (sent != SOCKET_ERROR && sent > 0) {
-					// 実際に送信できたバイト数を加算する
+			// 本文の長さ
+			int bodySize = static_cast<int>(strlen(text));
+
+			if (bodySize > 0) {
+
+				// ヘッダー4バイト + 本文
+				char sendBuffer[260]{};
+
+				// 先頭2バイト：本文の長さ
+				uint16_t length = static_cast<uint16_t>(bodySize);
+				memcpy(sendBuffer, &length, sizeof(length));
+
+				// 後ろ2バイト：メッセージ種別
+				uint16_t type = static_cast<uint16_t>(MessageType::Text);
+				memcpy(sendBuffer + 2, &type, sizeof(type));
+
+				// 4バイトのヘッダーの後ろに本文をコピー
+				memcpy(sendBuffer + 4, text, bodySize);
+
+				// 送信するデータ全体のサイズ
+				int sendSize = 4 + bodySize;
+
+				// 全データを送信する
+				int totalSent = 0;
+				bool communicationOK = true;
+
+				while (totalSent < sendSize) {
+					int sent = send(sock, sendBuffer + totalSent, sendSize - totalSent, 0);
+
+					if (sent == SOCKET_ERROR || sent == 0) {
+						communicationOK = false;
+						break;
+					}
+
+					totalSent += sent;
 					totalBytesSent += sent;
+				}
 
-					// サーバーからの返信を受信する
-					char buffer[256]{};
-					int received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+				// -------------------------
+				// ヘッダーの受信
+				// -------------------------
+				if (communicationOK) {
+					char header[4]{};
+					int totalHeaderReceived = 0;
 
-					if (received > 0) {
-						// 受信した文字列の末尾に終端文字を追加
-						buffer[received] = '\0';
+					// ヘッダー4バイトをすべて受信する
+					while (totalHeaderReceived < 4) {
+						int received = recv(sock, header + totalHeaderReceived, 4 - totalHeaderReceived, 0);
 
-						// 受信した文字列の末尾にランダムな英数字を追加する
-						std::string reply = AddRandomString(buffer);
+						if (received <= 0) {
+							communicationOK = false;
+							break;
+						}
 
-						// ランダム文字列を追加した内容を保存する
-						strcpy_s(receivedText, sizeof(receivedText), reply.c_str());
-
-						// 受信したバイト数を加算する
+						totalHeaderReceived += received;
 						totalBytesReceived += received;
 					}
+
+					if (communicationOK) {
+						// ヘッダーから本文の長さを取得
+						uint16_t receivedBodySize = 0;
+						memcpy(&receivedBodySize, header, sizeof(receivedBodySize));
+
+						// ヘッダーからメッセージ種別を取得
+						uint16_t receivedType = 0;
+						memcpy(&receivedType, header + 2, sizeof(receivedType));
+
+						// 本文のサイズがバッファに収まるか確認
+						if (receivedBodySize < sizeof(receivedText)) {
+							int totalBodyReceived = 0;
+
+							// 本文をすべて受信する
+							while (totalBodyReceived < receivedBodySize) {
+								int received = recv(sock, receivedText + totalBodyReceived, receivedBodySize - totalBodyReceived, 0);
+
+								if (received <= 0) {
+									communicationOK = false;
+									break;
+								}
+
+								totalBodyReceived += received;
+								totalBytesReceived += received;
+							}
+
+							if (communicationOK) {
+								receivedText[totalBodyReceived] = '\0';
+							}
+						} else {
+							communicationOK = false;
+						}
+					}
+				}
+
+				// -------------------------
+				// 通信エラーへの対応
+				// -------------------------
+				if (!communicationOK) {
+					shutdown(sock, SD_BOTH);
+					closesocket(sock);
+					sock = INVALID_SOCKET;
+					connected = false;
+
+					strcpy_s(receivedText, sizeof(receivedText), "Connection closed or communication error");
 				}
 			}
 		}
