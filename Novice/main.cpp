@@ -1,255 +1,312 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+
 #include <Novice.h>
+#include <imgui.h>
+
 #include <cstdint>
 #include <cstring>
-#include <imgui.h>
 #include <vector>
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
+
 #pragma comment(lib, "Ws2_32.lib")
 
-// メッセージ種別を定義する
+const char kWindowTitle[] = "TCP Multiplayer";
+
+constexpr int kScreenWidth = 1280;
+constexpr int kScreenHeight = 720;
+constexpr int kHeaderSize = 4;
+constexpr int kMaxPayloadSize = 1024;
+constexpr int kBufferSize = kHeaderSize + kMaxPayloadSize;
+
 enum class MessageType : uint16_t { Text = 1, AssignPlayerId = 2, JoinRequest = 3, WorldState = 4, Disconnect = 5 };
 
-// Windowsアプリのmain関数。ImGuiを使うため、Debugで実行する。
+struct PlayerState {
+	uint16_t id;
+	uint16_t x;
+	uint16_t y;
+};
+
+// メッセージのヘッダーを作成して送信する
+bool SendMessage(SOCKET sock, MessageType type) {
+	uint16_t payloadSize = 0;
+
+	char frame[kHeaderSize]{};
+
+	std::memcpy(frame, &payloadSize, sizeof(payloadSize));
+	std::memcpy(frame + 2, &type, sizeof(type));
+
+	int sentBytes = 0;
+
+	while (sentBytes < kHeaderSize) {
+		int sent = send(sock, frame + sentBytes, kHeaderSize - sentBytes, 0);
+
+		if (sent <= 0) {
+			return false;
+		}
+
+		sentBytes += sent;
+	}
+
+	return true;
+}
+
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
-	Novice::Initialize("NT1_01_00", 1280, 740);
-	char host[64] = "34.104.202.113";
-	char port[8] = "8000";
+	Novice::Initialize(kWindowTitle, kScreenWidth, kScreenHeight);
+
+	if (WSAStartup(MAKEWORD(2, 2), new WSADATA{}) != 0) {
+		Novice::Finalize();
+		return 1;
+	}
+
+	SOCKET sock = INVALID_SOCKET;
 	bool connected = false;
 
-	// 通信用の変数を用意し、Winsockを初期化する。
-	WSADATA wsaData;
-	SOCKET sock = INVALID_SOCKET;
+	char ipAddress[64] = "34.104.202.113";
+	int port = 8000;
 
-	// 送信する文字列
-	char text[256] = "";
+	uint16_t myPlayerId = 0;
 
-	// サーバーから受信した文字列
-	char receivedText[256] = "";
-
-	// 送信・受信したバイト数
-	int totalBytesSent = 0;
-	int totalBytesReceived = 0;
-
-	// Winsockを初期化する
-	WSAStartup(MAKEWORD(2, 2), &wsaData); // windowsの通信機能を準備する
-
-	// プレイヤー
-	struct PlayerState {
-		uint16_t id, x, y;
-	};
 	std::vector<PlayerState> players;
+
+	// 受信バッファはゲームループの外で保持する。
+	// TCPでは1回の recv で1メッセージ全部が届くとは限らない。
+	char receiveBuffer[kBufferSize]{};
+	int receivedBytes = 0;
 
 	while (Novice::ProcessMessage() == 0) {
 		Novice::BeginFrame();
 
-		// ImGuiの処理など
-#ifdef USE_IMGUI
-		ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Once);
-		ImGui::SetNextWindowSize(ImVec2(600, 200), ImGuiCond_Once);
+		// 接続画面
 		ImGui::Begin("TCP Connection");
-		ImGui::BeginDisabled(connected);
-		ImGui::InputText("Host", host, sizeof(host));
-		ImGui::InputText("Port", port, sizeof(port));
-		if (ImGui::Button("Connect")) {
 
-			// 接続先を取得し、ソケットを作って接続する。
-			addrinfo hints{};
-			addrinfo* result = nullptr;
+		ImGui::InputText("Server IP", ipAddress, sizeof(ipAddress));
 
-			// TCP通信の設定
-			hints.ai_family = AF_INET;
-			hints.ai_socktype = SOCK_STREAM;
-			hints.ai_protocol = IPPROTO_TCP;
+		ImGui::InputInt("Port", &port);
 
-			// 接続先の情報を取得する
-			if (getaddrinfo(host, port, &hints, &result) == 0) {
+		if (!connected) {
+			if (ImGui::Button("Connect")) {
+				addrinfo hints{};
+				hints.ai_family = AF_UNSPEC;
+				hints.ai_socktype = SOCK_STREAM;
+				hints.ai_protocol = IPPROTO_TCP;
 
-				// ソケットを作成する
-				sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+				addrinfo* result = nullptr;
+				char portText[16]{};
+				sprintf_s(portText, "%d", port);
 
-				// ソケットの作成に成功した場合
+				if (getaddrinfo(ipAddress, portText, &hints, &result) == 0) {
+					for (addrinfo* address = result; address != nullptr; address = address->ai_next) {
+						SOCKET candidate = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+
+						if (candidate == INVALID_SOCKET) {
+							continue;
+						}
+
+						if (connect(candidate, address->ai_addr, static_cast<int>(address->ai_addrlen)) == 0) {
+							sock = candidate;
+							break;
+						}
+
+						closesocket(candidate);
+					}
+
+					freeaddrinfo(result);
+				}
+
 				if (sock != INVALID_SOCKET) {
-
-					// サーバーに接続する
-					if (connect(sock, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0) {
-						connected = true;
-
+					// まず JoinRequest を送る。
+					// この時点ではソケットはブロッキング状態。
+					if (SendMessage(sock, MessageType::JoinRequest)) {
 						u_long nonBlocking = 1;
 
-						if (ioctlsocket(sock, FIONBIO, &nonBlocking) == SOCKET_ERROR) {
+						if (ioctlsocket(sock, FIONBIO, &nonBlocking) == 0) {
+							connected = true;
+							receivedBytes = 0;
+							players.clear();
+							myPlayerId = 0;
+						} else {
 							closesocket(sock);
 							sock = INVALID_SOCKET;
-							connected = false;
-						} else {
-							connected = true;
-
-							// 参加リクエストを送る
-							uint16_t payloadSize = 0;
-							MessageType type = MessageType::JoinRequest;
-							char sendFrame[4]{};
-							std::memcpy(sendFrame, &payloadSize, sizeof(payloadSize));
-							std::memcpy(sendFrame + 2, &type, sizeof(type));
-
-							// 4バイト送りきる
-							int sentBytes = 0;
-							while (connected && sentBytes < 4) {
-								int sent = send(sock, sendFrame + sentBytes, 4 - sentBytes, 0);
-								if (sent == SOCKET_ERROR || sent == 0) {
-									connected = false;
-									break;
-								}
-								sentBytes += sent;
-							}
 						}
 					} else {
-						// 接続に失敗した場合はソケットを閉じる
 						closesocket(sock);
 						sock = INVALID_SOCKET;
 					}
 				}
+			}
+		} else {
+			ImGui::Text("Connected");
+			ImGui::Text("My Player ID: %u", myPlayerId);
 
-				// 接続先の情報を解放する
-				freeaddrinfo(result);
+			if (ImGui::Button("Disconnect")) {
+				SendMessage(sock, MessageType::Disconnect);
+
+				shutdown(sock, SD_BOTH);
+				closesocket(sock);
+
+				sock = INVALID_SOCKET;
+				connected = false;
+				receivedBytes = 0;
+				players.clear();
+				myPlayerId = 0;
 			}
 		}
-		ImGui::EndDisabled();
-		ImGui::SameLine();
-		ImGui::BeginDisabled(!connected);
 
-		// 接続中の場合は切断ボタンを有効にする
-		if (ImGui::Button("Disconnect")) {
-			// 通信を終了する
-			shutdown(sock, SD_BOTH);
+		ImGui::End();
 
-			// ソケットを閉じる
-			closesocket(sock);
-
-			// 無効なソケットに戻す
-			sock = INVALID_SOCKET;
-
-			// 未接続状態にする
-			connected = false;
-		}
-		ImGui::EndDisabled();
-		ImGui::Text("Status: %s", connected ? "Connected" : "Not connected");
-
+		// サーバーからの受信
 		if (connected) {
-			// 毎フレーム受信データを確認する
-			char receiveFrame[1028]{};
-			int receivedBytes = 0;
+			bool shouldDisconnect = false;
 
-			// データを受信する
 			while (true) {
-				int received = recv(sock, receiveFrame + receivedBytes, static_cast<int>(sizeof(receiveFrame)) - receivedBytes, 0);
+				const int available = kBufferSize - receivedBytes;
+
+				if (available <= 0) {
+					// バッファが満杯なのに処理できない場合は異常。
+					shouldDisconnect = true;
+					break;
+				}
+
+				int received = recv(sock, receiveBuffer + receivedBytes, available, 0);
 
 				if (received > 0) {
 					receivedBytes += received;
 				} else if (received == 0) {
-					// サーバーが接続を切断した
-					connected = false;
+					// サーバーが接続を切断した。
+					shouldDisconnect = true;
 					break;
 				} else {
-					// ノンブロッキングソケットの場合、
-					// WSAEWOULDBLOCK は「今はデータがない」
-					if (WSAGetLastError() == WSAEWOULDBLOCK) {
+					int error = WSAGetLastError();
+
+					if (error == WSAEWOULDBLOCK) {
+						// 現時点で受信データがない。
 						break;
 					}
 
-					// その他の通信エラー
-					connected = false;
-					break;
-				}
-
-				// バッファがいっぱいになった
-				if (receivedBytes == sizeof(receiveFrame)) {
+					shouldDisconnect = true;
 					break;
 				}
 			}
 
-			// 受信したデータからフレームを取り出す
-			while (connected && receivedBytes >= 4) {
-
-				// ヘッダーから本文長と種別を取得する
+			// バッファ内に完全なメッセージがある間、順番に処理する。
+			while (!shouldDisconnect && receivedBytes >= kHeaderSize) {
 				uint16_t payloadSize = 0;
 				MessageType type{};
 
-				std::memcpy(&payloadSize, receiveFrame, sizeof(payloadSize));
-				std::memcpy(&type, receiveFrame + 2, sizeof(type));
+				std::memcpy(&payloadSize, receiveBuffer, sizeof(payloadSize));
 
-				// 本文がバッファの上限を超えている場合は切断する
-				if (payloadSize > 1024) {
-					connected = false;
+				std::memcpy(&type, receiveBuffer + 2, sizeof(type));
+
+				if (payloadSize > kMaxPayloadSize) {
+					shouldDisconnect = true;
 					break;
 				}
 
-				// ヘッダーと本文が揃っていない場合は次回に持ち越す
-				int frameSize = 4 + payloadSize;
+				const int frameSize = kHeaderSize + payloadSize;
 
+				// メッセージ全体が届くまで処理を待つ。
 				if (receivedBytes < frameSize) {
 					break;
 				}
 
-				// 本文の先頭アドレス
-				const char* payload = receiveFrame + 4;
+				const char* payload = receiveBuffer + kHeaderSize;
 
-				// MessageTypeで振り分ける
 				switch (type) {
-
 				case MessageType::Text:
-					// Textの処理
+					// 必要に応じてテキストを処理する。
 					break;
 
 				case MessageType::AssignPlayerId:
-					// 自分のプレイヤーIDを取得する処理
+					if (payloadSize == sizeof(uint16_t)) {
+						std::memcpy(&myPlayerId, payload, sizeof(myPlayerId));
+					}
 					break;
 
-				case MessageType::WorldState:
-					// プレイヤー一覧を更新する処理
-					// payload と payloadSize を使って解析する
-					break;
+				case MessageType::WorldState: {
+					// 人数を読み取る
+					if (payloadSize < sizeof(uint16_t)) {
+						shouldDisconnect = true;
+						break;
+					}
 
+					uint16_t count = 0;
+					std::memcpy(&count, payload, sizeof(count));
+
+					// 1人分のデータサイズ
+					constexpr size_t kPlayerDataSize = sizeof(PlayerState);
+
+					// 期待する本文のサイズ
+					const size_t expectedSize = sizeof(uint16_t) + static_cast<size_t>(count) * kPlayerDataSize;
+
+					// 人数と本文長が合う場合だけ一覧を読む
+					if (count <= 128 && payloadSize == expectedSize) {
+						players.resize(count);
+
+						for (uint16_t i = 0; i < count; ++i) {
+							const char* playerData = payload + sizeof(uint16_t) + static_cast<size_t>(i) * kPlayerDataSize;
+
+							std::memcpy(&players[i].id, playerData, sizeof(players[i].id));
+
+							std::memcpy(&players[i].x, playerData + sizeof(players[i].id), sizeof(players[i].x));
+
+							std::memcpy(&players[i].y, playerData + sizeof(players[i].id) + sizeof(players[i].x), sizeof(players[i].y));
+						}
+					} else {
+						shouldDisconnect = true;
+					}
+
+					break;
+				}
 				case MessageType::Disconnect:
-					// 切断通知の処理
+					shouldDisconnect = true;
 					break;
 
 				default:
-					// 未知のメッセージ種別
+					// 未定義のメッセージ種別。
+					shouldDisconnect = true;
 					break;
 				}
 
-				// 処理済みのフレームを取り除く
-				receivedBytes -= frameSize;
-				std::memmove(receiveFrame, receiveFrame + frameSize, receivedBytes);
+				// 処理済みメッセージを取り除き、
+				// 残ったデータをバッファの先頭へ移動する。
+				if (!shouldDisconnect) {
+					receivedBytes -= frameSize;
+
+					std::memmove(receiveBuffer, receiveBuffer + frameSize, receivedBytes);
+				}
 			}
 
-			// 接続が切れた場合はソケットを閉じる
-			if (!connected) {
+			if (shouldDisconnect) {
 				shutdown(sock, SD_BOTH);
 				closesocket(sock);
+
 				sock = INVALID_SOCKET;
+				connected = false;
 				receivedBytes = 0;
+				players.clear();
+				myPlayerId = 0;
 			}
 		}
-		ImGui::End();
-#endif
+
+		// プレイヤー一覧を描画する
+		for (const PlayerState& player : players) {
+			uint32_t color = 0x55BD79FF;
+			Novice::DrawEllipse(static_cast<int>(player.x), static_cast<int>(player.y), 20, 20, 0.0f, color, kFillModeSolid);
+		}
+
 		Novice::EndFrame();
 	}
 
-	// 接続が残っていれば閉じ、Winsockを終了する。
 	if (sock != INVALID_SOCKET) {
-		// 通信を終了する
 		shutdown(sock, SD_BOTH);
-
-		// ソケットを閉じる
 		closesocket(sock);
 	}
 
-	// Winsockを終了する
 	WSACleanup();
-
 	Novice::Finalize();
+
 	return 0;
 }
