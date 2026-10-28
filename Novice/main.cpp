@@ -4,12 +4,13 @@
 #include <cstdint>
 #include <cstring>
 #include <imgui.h>
+#include <vector>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "Ws2_32.lib")
 
-//
-enum class MessageType : uint16_t { Text = 1 };
+// メッセージ種別を定義する
+enum class MessageType : uint16_t { Text = 1, AssignPlayerId = 2, JoinRequest = 3, WorldState = 4, Disconnect = 5 };
 
 // Windowsアプリのmain関数。ImGuiを使うため、Debugで実行する。
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
@@ -35,8 +36,16 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	// Winsockを初期化する
 	WSAStartup(MAKEWORD(2, 2), &wsaData); // windowsの通信機能を準備する
 
+	// プレイヤー
+	struct PlayerState {
+		uint16_t id, x, y;
+	};
+	std::vector<PlayerState> players;
+
 	while (Novice::ProcessMessage() == 0) {
 		Novice::BeginFrame();
+
+		// ImGuiの処理など
 #ifdef USE_IMGUI
 		ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Once);
 		ImGui::SetNextWindowSize(ImVec2(600, 200), ImGuiCond_Once);
@@ -67,6 +76,34 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 					// サーバーに接続する
 					if (connect(sock, result->ai_addr, static_cast<int>(result->ai_addrlen)) == 0) {
 						connected = true;
+
+						u_long nonBlocking = 1;
+
+						if (ioctlsocket(sock, FIONBIO, &nonBlocking) == SOCKET_ERROR) {
+							closesocket(sock);
+							sock = INVALID_SOCKET;
+							connected = false;
+						} else {
+							connected = true;
+
+							// 参加リクエストを送る
+							uint16_t payloadSize = 0;
+							MessageType type = MessageType::JoinRequest;
+							char sendFrame[4]{};
+							std::memcpy(sendFrame, &payloadSize, sizeof(payloadSize));
+							std::memcpy(sendFrame + 2, &type, sizeof(type));
+
+							// 4バイト送りきる
+							int sentBytes = 0;
+							while (connected && sentBytes < 4) {
+								int sent = send(sock, sendFrame + sentBytes, 4 - sentBytes, 0);
+								if (sent == SOCKET_ERROR || sent == 0) {
+									connected = false;
+									break;
+								}
+								sentBytes += sent;
+							}
+						}
 					} else {
 						// 接続に失敗した場合はソケットを閉じる
 						closesocket(sock);
@@ -99,133 +136,103 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 		ImGui::EndDisabled();
 		ImGui::Text("Status: %s", connected ? "Connected" : "Not connected");
 
-		// 送信する文字列を入力
-		ImGui::InputText("Text", text, sizeof(text));
+		if (connected) {
+			// 毎フレーム受信データを確認する
+			char receiveFrame[1028]{};
+			int receivedBytes = 0;
 
-		// 接続中だけSendボタンを有効にする
-		ImGui::BeginDisabled(!connected);
+			// データを受信する
+			while (true) {
+				int received = recv(sock, receiveFrame + receivedBytes, static_cast<int>(sizeof(receiveFrame)) - receivedBytes, 0);
 
-		if (ImGui::Button("Send")) {
-
-			// 今回の送受信カウンタをリセット
-			totalBytesSent = 0;
-			totalBytesReceived = 0;
-
-			// 本文の長さ
-			int bodySize = static_cast<int>(strlen(text));
-
-			if (bodySize > 0) {
-
-				// ヘッダー4バイト + 本文
-				char sendBuffer[260]{};
-
-				// 先頭2バイト：本文の長さ
-				uint16_t length = static_cast<uint16_t>(bodySize);
-				memcpy(sendBuffer, &length, sizeof(length));
-
-				// 後ろ2バイト：メッセージ種別
-				uint16_t type = static_cast<uint16_t>(MessageType::Text);
-				memcpy(sendBuffer + 2, &type, sizeof(type));
-
-				// 4バイトのヘッダーの後ろに本文をコピー
-				memcpy(sendBuffer + 4, text, bodySize);
-
-				// 送信するデータ全体のサイズ
-				int sendSize = 4 + bodySize;
-
-				// 全データを送信する
-				int totalSent = 0;
-				bool communicationOK = true;
-
-				while (totalSent < sendSize) {
-					int sent = send(sock, sendBuffer + totalSent, sendSize - totalSent, 0);
-
-					if (sent == SOCKET_ERROR || sent == 0) {
-						communicationOK = false;
+				if (received > 0) {
+					receivedBytes += received;
+				} else if (received == 0) {
+					// サーバーが接続を切断した
+					connected = false;
+					break;
+				} else {
+					// ノンブロッキングソケットの場合、
+					// WSAEWOULDBLOCK は「今はデータがない」
+					if (WSAGetLastError() == WSAEWOULDBLOCK) {
 						break;
 					}
 
-					totalSent += sent;
-					totalBytesSent += sent;
-				}
-
-				// -------------------------
-				// ヘッダーの受信
-				// -------------------------
-				if (communicationOK) {
-					char header[4]{};
-					int totalHeaderReceived = 0;
-
-					// ヘッダー4バイトをすべて受信する
-					while (totalHeaderReceived < 4) {
-						int received = recv(sock, header + totalHeaderReceived, 4 - totalHeaderReceived, 0);
-
-						if (received <= 0) {
-							communicationOK = false;
-							break;
-						}
-
-						totalHeaderReceived += received;
-						totalBytesReceived += received;
-					}
-
-					if (communicationOK) {
-						// ヘッダーから本文の長さを取得
-						uint16_t receivedBodySize = 0;
-						memcpy(&receivedBodySize, header, sizeof(receivedBodySize));
-
-						// ヘッダーからメッセージ種別を取得
-						uint16_t receivedType = 0;
-						memcpy(&receivedType, header + 2, sizeof(receivedType));
-
-						// 本文のサイズがバッファに収まるか確認
-						if (receivedBodySize < sizeof(receivedText)) {
-							int totalBodyReceived = 0;
-
-							// 本文をすべて受信する
-							while (totalBodyReceived < receivedBodySize) {
-								int received = recv(sock, receivedText + totalBodyReceived, receivedBodySize - totalBodyReceived, 0);
-
-								if (received <= 0) {
-									communicationOK = false;
-									break;
-								}
-
-								totalBodyReceived += received;
-								totalBytesReceived += received;
-							}
-
-							if (communicationOK) {
-								receivedText[totalBodyReceived] = '\0';
-							}
-						} else {
-							communicationOK = false;
-						}
-					}
-				}
-
-				// -------------------------
-				// 通信エラーへの対応
-				// -------------------------
-				if (!communicationOK) {
-					shutdown(sock, SD_BOTH);
-					closesocket(sock);
-					sock = INVALID_SOCKET;
+					// その他の通信エラー
 					connected = false;
+					break;
+				}
 
-					strcpy_s(receivedText, sizeof(receivedText), "Connection closed or communication error");
+				// バッファがいっぱいになった
+				if (receivedBytes == sizeof(receiveFrame)) {
+					break;
 				}
 			}
+
+			// 受信したデータからフレームを取り出す
+			while (connected && receivedBytes >= 4) {
+
+				// ヘッダーから本文長と種別を取得する
+				uint16_t payloadSize = 0;
+				MessageType type{};
+
+				std::memcpy(&payloadSize, receiveFrame, sizeof(payloadSize));
+				std::memcpy(&type, receiveFrame + 2, sizeof(type));
+
+				// 本文がバッファの上限を超えている場合は切断する
+				if (payloadSize > 1024) {
+					connected = false;
+					break;
+				}
+
+				// ヘッダーと本文が揃っていない場合は次回に持ち越す
+				int frameSize = 4 + payloadSize;
+
+				if (receivedBytes < frameSize) {
+					break;
+				}
+
+				// 本文の先頭アドレス
+				const char* payload = receiveFrame + 4;
+
+				// MessageTypeで振り分ける
+				switch (type) {
+
+				case MessageType::Text:
+					// Textの処理
+					break;
+
+				case MessageType::AssignPlayerId:
+					// 自分のプレイヤーIDを取得する処理
+					break;
+
+				case MessageType::WorldState:
+					// プレイヤー一覧を更新する処理
+					// payload と payloadSize を使って解析する
+					break;
+
+				case MessageType::Disconnect:
+					// 切断通知の処理
+					break;
+
+				default:
+					// 未知のメッセージ種別
+					break;
+				}
+
+				// 処理済みのフレームを取り除く
+				receivedBytes -= frameSize;
+				std::memmove(receiveFrame, receiveFrame + frameSize, receivedBytes);
+			}
+
+			// 接続が切れた場合はソケットを閉じる
+			if (!connected) {
+				shutdown(sock, SD_BOTH);
+				closesocket(sock);
+				sock = INVALID_SOCKET;
+				receivedBytes = 0;
+			}
 		}
-		ImGui::EndDisabled();
-
-		// 受信した文字列を表示
-		ImGui::Text("Received: %s", receivedText);
-
-		// 送受信したバイト数を表示
-		ImGui::Text("Sent: %d bytes", totalBytesSent);
-		ImGui::Text("Received: %d bytes", totalBytesReceived);
-		ImGui::Text("Total: %d bytes", totalBytesSent + totalBytesReceived);
 		ImGui::End();
 #endif
 		Novice::EndFrame();
