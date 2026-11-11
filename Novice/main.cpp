@@ -21,13 +21,16 @@ constexpr int kHeaderSize = 4;
 constexpr int kMaxPayloadSize = 1024;
 constexpr int kBufferSize = kHeaderSize + kMaxPayloadSize;
 
-enum class MessageType : uint16_t { Text = 1, AssignPlayerId = 2, JoinRequest = 3, WorldState = 4, Disconnect = 5 };
+enum class MessageType : uint16_t { Text = 1, AssignPlayerId = 2, JoinRequest = 3, WorldState = 4, Disconnect = 5, PlayerInput = 6 };
 
 struct PlayerState {
 	uint16_t id;
 	uint16_t x;
 	uint16_t y;
 };
+
+// キーボード入力の状態を保持する構造体
+char keys[256];
 
 // メッセージのヘッダーを作成して送信する
 bool SendMessage(SOCKET sock, MessageType type) {
@@ -56,7 +59,9 @@ bool SendMessage(SOCKET sock, MessageType type) {
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	Novice::Initialize(kWindowTitle, kScreenWidth, kScreenHeight);
 
-	if (WSAStartup(MAKEWORD(2, 2), new WSADATA{}) != 0) {
+	WSADATA wsaData{};
+
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
 		Novice::Finalize();
 		return 1;
 	}
@@ -76,8 +81,58 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 	char receiveBuffer[kBufferSize]{};
 	int receivedBytes = 0;
 
+	// ループ回数を保持する変数
+	int loopCount = 0;
+
 	while (Novice::ProcessMessage() == 0) {
 		Novice::BeginFrame();
+		loopCount++;
+
+		// キーボード入力の状態を更新する
+		Novice::GetHitKeyStateAll(keys);
+
+		if (connected) {
+			// プレイヤーの移動入力を取得する
+			uint16_t inputBits = 0;
+
+			if (keys[DIK_W]) {
+				inputBits |= 0x0001; // 上
+			}
+			if (keys[DIK_S]) {
+				inputBits |= 0x0002; // 下
+			}
+			if (keys[DIK_A]) {
+				inputBits |= 0x0004; // 左
+			}
+			if (keys[DIK_D]) {
+				inputBits |= 0x0008; // 右
+			}
+
+			// 送信データを作成する
+			uint16_t payloadSize = sizeof(inputBits);
+			MessageType type = MessageType::PlayerInput;
+
+			char sendFrame[kHeaderSize + sizeof(inputBits)]{};
+
+			std::memcpy(sendFrame, &payloadSize, sizeof(payloadSize));
+			std::memcpy(sendFrame + 2, &type, sizeof(type));
+			std::memcpy(sendFrame + 4, &inputBits, sizeof(inputBits));
+
+			// 入力をサーバーに送信する
+			int frameSize = sizeof(sendFrame);
+			int sentBytes = 0;
+
+			while (sentBytes < frameSize) {
+				int n = send(sock, sendFrame + sentBytes, frameSize - sentBytes, 0);
+
+				if (n > 0) {
+					sentBytes += n;
+				} else {
+					connected = false;
+					break;
+				}
+			}
+		}
 
 		// 接続画面
 		ImGui::Begin("TCP Connection");
@@ -165,8 +220,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 				const int available = kBufferSize - receivedBytes;
 
 				if (available <= 0) {
-					// バッファが満杯なのに処理できない場合は異常。
-					shouldDisconnect = true;
 					break;
 				}
 
@@ -191,43 +244,48 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 				}
 			}
 
-			// バッファ内に完全なメッセージがある間、順番に処理する。
 			while (!shouldDisconnect && receivedBytes >= kHeaderSize) {
-				uint16_t payloadSize = 0;
-				MessageType type{};
+				uint16_t receivePayloadSize = 0;
+				MessageType receiveType{};
 
-				std::memcpy(&payloadSize, receiveBuffer, sizeof(payloadSize));
+				std::memcpy(&receivePayloadSize, receiveBuffer, sizeof(receivePayloadSize));
 
-				std::memcpy(&type, receiveBuffer + 2, sizeof(type));
+				std::memcpy(&receiveType, receiveBuffer + 2, sizeof(receiveType));
 
-				if (payloadSize > kMaxPayloadSize) {
+				if (receivePayloadSize > kMaxPayloadSize) {
 					shouldDisconnect = true;
 					break;
 				}
 
-				const int frameSize = kHeaderSize + payloadSize;
+				const int receiveFrameSize = kHeaderSize + receivePayloadSize;
 
-				// メッセージ全体が届くまで処理を待つ。
-				if (receivedBytes < frameSize) {
+				if (receivedBytes < receiveFrameSize) {
 					break;
 				}
 
+				// 受信したメッセージの本文を処理する。
 				const char* payload = receiveBuffer + kHeaderSize;
 
-				switch (type) {
+				switch (receiveType) {
+					// メッセージ処理
 				case MessageType::Text:
 					// 必要に応じてテキストを処理する。
 					break;
 
 				case MessageType::AssignPlayerId:
-					if (payloadSize == sizeof(uint16_t)) {
+
+					// プレイヤーIDを読み取る
+					if (receivePayloadSize == sizeof(myPlayerId)) {
 						std::memcpy(&myPlayerId, payload, sizeof(myPlayerId));
+					} else {
+						shouldDisconnect = true;
 					}
+
 					break;
 
 				case MessageType::WorldState: {
 					// 人数を読み取る
-					if (payloadSize < sizeof(uint16_t)) {
+					if (receivePayloadSize < sizeof(uint16_t)) {
 						shouldDisconnect = true;
 						break;
 					}
@@ -242,7 +300,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 					const size_t expectedSize = sizeof(uint16_t) + static_cast<size_t>(count) * kPlayerDataSize;
 
 					// 人数と本文長が合う場合だけ一覧を読む
-					if (count <= 128 && payloadSize == expectedSize) {
+					if (count <= 128 && receivePayloadSize == expectedSize) {
 						players.resize(count);
 
 						for (uint16_t i = 0; i < count; ++i) {
@@ -273,9 +331,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 				// 処理済みメッセージを取り除き、
 				// 残ったデータをバッファの先頭へ移動する。
 				if (!shouldDisconnect) {
-					receivedBytes -= frameSize;
+					receivedBytes -= receiveFrameSize;
 
-					std::memmove(receiveBuffer, receiveBuffer + frameSize, receivedBytes);
+					std::memmove(receiveBuffer, receiveBuffer + receiveFrameSize, receivedBytes);
 				}
 			}
 
@@ -293,8 +351,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 		// プレイヤー一覧を描画する
 		for (const PlayerState& player : players) {
-			uint32_t color = 0x55BD79FF;
+			uint32_t color = player.id == myPlayerId ? 0xFF0000FF : 0x55BD79FF;
 			Novice::DrawEllipse(static_cast<int>(player.x), static_cast<int>(player.y), 20, 20, 0.0f, color, kFillModeSolid);
+
+			// 自分のプレイヤーの周りにリングを描画する
+			if (player.id == myPlayerId) {
+				int ring = 20 + static_cast<int>(loopCount % 30);
+				Novice::DrawEllipse(static_cast<int>(player.x), static_cast<int>(player.y), ring, ring, 0.0f, 0xFFFFFFFF, kFillModeWireFrame);
+			}
 		}
 
 		Novice::EndFrame();
