@@ -32,28 +32,24 @@ struct PlayerState {
 // キーボード入力の状態を保持する構造体
 char keys[256];
 
-// メッセージのヘッダーを作成して送信する
-bool SendMessage(SOCKET sock, MessageType type) {
-	uint16_t payloadSize = 0;
+// メッセージを送信待ちキューに追加する
+void QueueMessage(std::vector<char>& sendQueue, MessageType type, const void* payload, uint16_t payloadSize) {
+	const size_t oldSize = sendQueue.size();
+	const size_t frameSize = kHeaderSize + payloadSize;
 
-	char frame[kHeaderSize]{};
+	// メッセージ分の領域を確保
+	sendQueue.resize(oldSize + frameSize);
 
+	char* frame = sendQueue.data() + oldSize;
+
+	// ヘッダーを設定
 	std::memcpy(frame, &payloadSize, sizeof(payloadSize));
 	std::memcpy(frame + 2, &type, sizeof(type));
 
-	int sentBytes = 0;
-
-	while (sentBytes < kHeaderSize) {
-		int sent = send(sock, frame + sentBytes, kHeaderSize - sentBytes, 0);
-
-		if (sent <= 0) {
-			return false;
-		}
-
-		sentBytes += sent;
+	// 本文がある場合はコピー
+	if (payloadSize > 0 && payload != nullptr) {
+		std::memcpy(frame + kHeaderSize, payload, payloadSize);
 	}
-
-	return true;
 }
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
@@ -76,6 +72,12 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 	std::vector<PlayerState> players;
 
+	// 送信待ちデータ
+	std::vector<char> sendQueue;
+
+	// 送信済みのバイト数
+	size_t sendOffset = 0;
+
 	// 受信バッファはゲームループの外で保持する。
 	// TCPでは1回の recv で1メッセージ全部が届くとは限らない。
 	char receiveBuffer[kBufferSize]{};
@@ -90,49 +92,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 		// キーボード入力の状態を更新する
 		Novice::GetHitKeyStateAll(keys);
-
-		if (connected) {
-			// プレイヤーの移動入力を取得する
-			uint16_t inputBits = 0;
-
-			if (keys[DIK_W]) {
-				inputBits |= 0x0001; // 上
-			}
-			if (keys[DIK_S]) {
-				inputBits |= 0x0002; // 下
-			}
-			if (keys[DIK_A]) {
-				inputBits |= 0x0004; // 左
-			}
-			if (keys[DIK_D]) {
-				inputBits |= 0x0008; // 右
-			}
-
-			// 送信データを作成する
-			uint16_t payloadSize = sizeof(inputBits);
-			MessageType type = MessageType::PlayerInput;
-
-			char sendFrame[kHeaderSize + sizeof(inputBits)]{};
-
-			std::memcpy(sendFrame, &payloadSize, sizeof(payloadSize));
-			std::memcpy(sendFrame + 2, &type, sizeof(type));
-			std::memcpy(sendFrame + 4, &inputBits, sizeof(inputBits));
-
-			// 入力をサーバーに送信する
-			int frameSize = sizeof(sendFrame);
-			int sentBytes = 0;
-
-			while (sentBytes < frameSize) {
-				int n = send(sock, sendFrame + sentBytes, frameSize - sentBytes, 0);
-
-				if (n > 0) {
-					sentBytes += n;
-				} else {
-					connected = false;
-					break;
-				}
-			}
-		}
 
 		// 接続画面
 		ImGui::Begin("TCP Connection");
@@ -173,19 +132,23 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 				if (sock != INVALID_SOCKET) {
 					// まず JoinRequest を送る。
-					// この時点ではソケットはブロッキング状態。
-					if (SendMessage(sock, MessageType::JoinRequest)) {
-						u_long nonBlocking = 1;
+					// ノンブロッキングに切り替える
+					u_long nonBlocking = 1;
 
-						if (ioctlsocket(sock, FIONBIO, &nonBlocking) == 0) {
-							connected = true;
-							receivedBytes = 0;
-							players.clear();
-							myPlayerId = 0;
-						} else {
-							closesocket(sock);
-							sock = INVALID_SOCKET;
-						}
+					if (ioctlsocket(sock, FIONBIO, &nonBlocking) == 0) {
+
+						connected = true;
+
+						receivedBytes = 0;
+						players.clear();
+						myPlayerId = 0;
+
+						sendQueue.clear();
+						sendOffset = 0;
+
+						// 接続直後にJoinRequestを送信待ちに追加
+						QueueMessage(sendQueue, MessageType::JoinRequest, nullptr, 0);
+
 					} else {
 						closesocket(sock);
 						sock = INVALID_SOCKET;
@@ -197,16 +160,19 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 			ImGui::Text("My Player ID: %u", myPlayerId);
 
 			if (ImGui::Button("Disconnect")) {
-				SendMessage(sock, MessageType::Disconnect);
+				connected = false;
 
 				shutdown(sock, SD_BOTH);
 				closesocket(sock);
 
 				sock = INVALID_SOCKET;
-				connected = false;
+
 				receivedBytes = 0;
 				players.clear();
 				myPlayerId = 0;
+
+				sendQueue.clear();
+				sendOffset = 0;
 			}
 		}
 
@@ -214,8 +180,88 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 
 		// サーバーからの受信
 		if (connected) {
+
+			// WASD入力を取得
+			uint16_t inputBits = 0;
+
+			if (keys[DIK_W]) {
+				inputBits |= 0x0001;
+			}
+
+			if (keys[DIK_S]) {
+				inputBits |= 0x0002;
+			}
+
+			if (keys[DIK_A]) {
+				inputBits |= 0x0004;
+			}
+
+			if (keys[DIK_D]) {
+				inputBits |= 0x0008;
+			}
+
+			// PlayerInputを送信待ちに追加
+			QueueMessage(sendQueue, MessageType::PlayerInput, &inputBits, sizeof(inputBits));
+
+			while (sendOffset < sendQueue.size()) {
+
+				int remaining = static_cast<int>(sendQueue.size() - sendOffset);
+
+				int sent = send(sock, sendQueue.data() + sendOffset, remaining, 0);
+
+				if (sent > 0) {
+
+					// 送信できた分だけ位置を進める
+					sendOffset += sent;
+
+				} else {
+
+					int error = WSAGetLastError();
+
+					if (sent == SOCKET_ERROR && error == WSAEWOULDBLOCK) {
+
+						// 今は送信できないので次のフレームに持ち越す
+						break;
+
+					} else {
+
+						// その他の送信エラー
+						connected = false;
+						break;
+					}
+				}
+			}
+
+			// 送信済みのデータをキューから削除する
+			if (connected) {
+				if (sendOffset > 0) {
+
+					// 送信済みのデータを削除する
+					sendQueue.erase(sendQueue.begin(), sendQueue.begin() + sendOffset);
+
+					sendOffset = 0;
+				}
+			}
+
+			// 接続が切断された場合、ソケットを閉じて状態をリセットする
+			if (!connected) {
+
+				shutdown(sock, SD_BOTH);
+				closesocket(sock);
+
+				sock = INVALID_SOCKET;
+
+				sendQueue.clear();
+				sendOffset = 0;
+				receivedBytes = 0;
+				players.clear();
+				myPlayerId = 0;
+			}
+
+			// 受信処理
 			bool shouldDisconnect = false;
 
+			// 受信バッファに空きがある限り、データを受信する
 			while (true) {
 				const int available = kBufferSize - receivedBytes;
 
@@ -244,6 +290,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 				}
 			}
 
+			// 受信バッファに1フレーム分のデータが揃っている限り、メッセージを処理する
 			while (!shouldDisconnect && receivedBytes >= kHeaderSize) {
 				uint16_t receivePayloadSize = 0;
 				MessageType receiveType{};
