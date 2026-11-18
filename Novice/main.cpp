@@ -156,9 +156,22 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
 				}
 			}
 		} else {
+
+			// 接続済みの場合は接続状態を表示する
 			ImGui::Text("Connected");
+
+			// 自分のプレイヤーIDを表示する
 			ImGui::Text("My Player ID: %u", myPlayerId);
 
+			// プレイヤー一覧を表示する
+			for (const auto& player : players) {
+				ImGui::Text("Player ID: %u", player.id);
+			}
+
+			// ゲームループの回数を表示する
+			ImGui::Text("Loop Count: %d", loopCount);
+
+			// 切断ボタンを押したら切断する
 			if (ImGui::Button("Disconnect")) {
 				connected = false;
 
